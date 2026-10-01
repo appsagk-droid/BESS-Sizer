@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BESS Sizing Calculator</title>
+  <style>
+    :root{color-scheme:light dark;--bg:#eef2f6;--card:#fff;--tx:#0b1f33;--mut:#5b6b7c;--bd:#d5dde6;--bar:#2563eb;--thr:#d97706;--bad:#b42318;--ok:#0f7a4d}
+    @media(prefers-color-scheme:dark){:root{--bg:#0a121b;--card:#111c28;--tx:#e6edf5;--mut:#90a0b2;--bd:#22334a;--bar:#5b9dff;--thr:#fbbf24;--bad:#f97066;--ok:#4ade80}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.45 "Space Grotesk",system-ui,sans-serif}
+    main{max-width:1000px;margin:0 auto;padding:20px 16px 40px;display:grid;gap:16px;grid-template-columns:minmax(0,1fr)}
+    @media(min-width:820px){main{grid-template-columns:minmax(0,5fr) minmax(0,6fr)}h1{grid-column:1/-1}}
+    h1{font-size:1.6rem;margin:0}h1 small{display:block;font-size:.9rem;font-weight:400;color:var(--mut)}h2{font-size:1rem;margin:0 0 10px}
+    section{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:14px}.col{display:grid;gap:16px;align-content:start}
+    label{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:.88rem;margin:6px 0}
+    input[type=number],select{width:145px;max-width:55%;padding:5px 7px;border:1px solid var(--bd);border-radius:6px;background:var(--bg);color:var(--tx);font:inherit;text-align:right}
+    select{text-align:left}textarea{width:100%;padding:7px;border:1px solid var(--bd);border-radius:6px;background:var(--bg);color:var(--tx);font:.78rem monospace}
+    input[type=file]{max-width:100%;font:inherit;font-size:.82rem}button{font:inherit;font-size:.84rem;padding:6px 11px;border:1px solid var(--bd);background:var(--bg);color:var(--tx);border-radius:6px;cursor:pointer}
+    button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid var(--bar);outline-offset:2px}.actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px}
+    .big{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}.big div{border:1px solid var(--bd);border-radius:8px;padding:10px}.big b{display:block;font-size:1.45rem;overflow-wrap:anywhere}.big span,.note{font-size:.8rem;color:var(--mut)}
+    .note{margin:8px 0 0}.message{font-size:.88rem;margin:10px 0 0}.bad{color:var(--bad)}.ok{color:var(--ok)}.tbl{overflow-x:auto}svg{width:100%;height:auto;display:block}
+    table{width:100%;border-collapse:collapse;font-size:.82rem;white-space:nowrap}th,td{padding:8px;text-align:right;border-bottom:1px solid var(--bd)}th{color:var(--mut);font-weight:600}th:first-child,td:first-child{text-align:left}tbody tr:last-child td{border-bottom:0}
+    .range{display:flex;align-items:center;gap:12px}.range input{width:100%;accent-color:var(--bar)}
+  </style>
+</head>
+<body>
+<main>
+  <h1>BESS sizing calculator<small>Paste interval kW data and set a target payback.</small></h1>
+  <form class="col" method="post" enctype="multipart/form-data">
+    <section>
+      <h2>Manipulating variables</h2>
+      <label for="target">Expected payback (years)<output id="target-value">{{ values.target }}</output></label>
+      <div class="range"><input id="target" name="target" type="range" min="1" max="15" step="0.5" value="{{ values.target }}"></div>
+      <h2 style="margin-top:14px">Load data (kW import)</h2>
+      <p class="note" style="margin:0 0 8px">Paste timestamp and kW columns, or upload a CSV. Each row should contain a date-time like 01-01-26 0:30 followed by kW.</p>
+      <textarea id="data" name="data" rows="7" aria-label="Load data">{{ data }}</textarea>
+      <div class="actions"><input type="file" name="file" accept=".csv,.txt,.tsv" aria-label="Upload CSV"><button type="submit">Calculate</button></div>
+      {% if stats %}<p class="note">{{ stats }}{% if day_count < 28 %}. Under a month of data: results assume these days repeat all year.{% else %}.{% endif %}</p>{% endif %}
+    </section>
+    <section>
+      <h2>Fixed variables</h2>
+      <label for="tariff-profile">Malaysia tariff profile
+        <select id="tariff-profile" name="tariff_profile">
+          {% for key, profile in tariff_profiles.items() %}
+          <option value="{{ key }}" {% if values.tariff_profile == key %}selected{% endif %}>{{ profile.label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <p class="note" id="profile-note">{{ tariff_note }}</p>
+      <label for="bess-model">BESS model
+        <select id="bess-model" name="bess_model">
+          <option value="model_216_130" {% if values.bess_model == 'model_216_130' %}selected{% endif %}>216 kWh / 130 kW</option>
+          <option value="model_522_260" {% if values.bess_model == 'model_522_260' %}selected{% endif %}>522 kWh / 260 kW</option>
+          <option value="custom" {% if values.bess_model == 'custom' %}selected{% endif %}>Custom specs</option>
+        </select>
+      </label>
+      <label>Price per BESS unit (RM)<input type="number" name="price" value="{{ values.price }}" min="0.01" step="any"></label>
+      <p class="note">Selecting a model fills its listed unit price. You can edit the price; manual price or spec edits switch the selector to Custom.</p>
+      <label>Unit energy (kWh)<input type="number" name="unit_kwh" value="{{ values.unit_kwh }}" min="0.01" step="any"></label>
+      <label>Unit power (kW)<input type="number" name="unit_kw" value="{{ values.unit_kw }}" min="0.01" step="any"></label>
+      <label>BESS sizing mode
+        <select name="sizing_mode">
+          <option value="automatic" {% if values.sizing_mode == 'automatic' %}selected{% endif %}>Optimize to payback target</option>
+          <option value="fixed" {% if values.sizing_mode == 'fixed' %}selected{% endif %}>Set number of units</option>
+        </select>
+      </label>
+      <label>Number of BESS units<input type="number" name="unit_count" value="{{ values.unit_count }}" min="1" max="200" step="1"></label>
+      <label>Round-trip efficiency (%)<input type="number" name="efficiency" value="{{ values.efficiency }}" min="0.01" max="100" step="any"></label>
+      <label>Usable depth of discharge (%)<input type="number" name="dod" value="{{ values.dod }}" min="0.01" max="100" step="any"></label>
+      <label>Peak tariff (RM/kWh)<input type="number" name="peak_tariff" value="{{ values.peak_tariff }}" min="0" step="any"></label>
+      <label>Off-peak tariff (RM/kWh)<input type="number" name="offpeak_tariff" value="{{ values.offpeak_tariff }}" min="0" step="any"></label>
+      <label>Peak window start hour<input type="number" name="peak_start" value="{{ values.peak_start }}" min="0" max="23" step="1"></label>
+      <label>Peak window end hour<input type="number" name="peak_end" value="{{ values.peak_end }}" min="1" max="24" step="1"></label>
+      <label>Maximum demand charge (RM/kW/month)<input type="number" name="demand_charge" value="{{ values.demand_charge }}" min="0" step="any"></label>
+      <label>Retail charge (RM/month)<input type="number" name="retail_charge" value="{{ values.retail_charge }}" min="0" step="any"></label>
+      <label>Battery life (years)<input type="number" name="life" value="{{ values.life }}" min="0.01" step="any"></label>
+      <label for="public-holidays">Public holidays (one date per line)
+        <textarea id="public-holidays" name="public_holidays" rows="3" placeholder="01-05-26&#10;31-08-26">{{ values.public_holidays }}</textarea>
+      </label>
+      <p class="note">Domestic ToU requires a smart meter. ToU peak: weekdays 14:00-22:00 (about 40 peak hours/week); all other hours are off-peak (about 128 hours/week). Holiday dates use dd-mm-yyyy and are treated as off-peak. Retail charges are shown but excluded from BESS savings because they do not vary with battery dispatch. Monthly maximum demand uses the highest uploaded reading in each month; 30-minute interval data is needed for an exact billed MD. HV energy rates were not included in the supplied schedule, so enter them from your bill.</p>
+    </section>
+  </form>
+  <div class="col">
+    <section>
+      <h2>Results</h2>
+      {% if error %}<p class="message bad" role="alert">{{ error }}</p>{% endif %}
+      {% if result %}
+      <div class="big">
+        <div><b>{{ "{:,.0f}".format(result.energy) }}</b><span>BESS size (kWh)</span></div>
+        <div><b>{{ result.units }}</b><span>Units of BESS</span></div>
+        <div><b>{{ "{:.0f}%".format(result.lifetime_roi) }}</b><span>Lifetime ROI</span></div>
+      </div>
+      <div class="big" style="margin-top:10px">
+        <div><b>{{ "{:,.0f}".format(result.power) }}</b><span>Power (kW)</span></div>
+        <div><b>{{ "{:,.0f}".format(result.cost) }}</b><span>Capex (RM)</span></div>
+        <div><b>{{ "{:,.0f}".format(result.saving) }}</b><span>Saving per year (RM)</span></div>
+        <div><b>{{ result.payback_display }}</b><span>Payback (years)</span></div>
+        <div><b>{{ "{:.1f}%".format(result.annual_roi) }}</b><span>Annual ROI</span></div>
+      </div>
+      <p class="message {{ 'ok' if result.met_target else 'bad' }}">
+        {% if result.met_target %}Meets your {{ "{:g}".format(target) }}-year target. Tariff-period peak shaved from {{ "{:.0f}".format(result.demand_peak) }} kW to {{ "{:.0f}".format(result.threshold) }} kW.
+        {% elif sizing_mode == 'fixed' %}The selected {{ result.units }}-unit system exceeds the {{ "{:g}".format(target) }}-year payback target ({{ result.payback_display }} years).
+        {% else %}No size pays back within {{ "{:g}".format(target) }} years. Showing the best case ({{ result.payback_display }} years). Raise the target, lower unit price, or check the demand charge.{% endif %}
+      </p>
+      <h2 style="margin-top:18px">Suggested BESS options</h2>
+      <p class="note">Based on the uploaded load profile and selected tariff. Rated size assumes {{ "{:g}".format(values.unit_kwh|float) }} kWh / {{ "{:g}".format(values.unit_kw|float) }} kW per unit; usable energy applies {{ "{:g}".format(values.dod|float) }}% depth of discharge and savings use {{ "{:g}".format(values.efficiency|float) }}% round-trip efficiency. ROI estimates use {{ "{:g}".format(values.life|float) }} years and do not include financing, degradation, or replacement costs.</p>
+      <div class="tbl" style="margin-top:8px">
+        <table>
+          <thead><tr><th>Units</th><th>Rated (kWh)</th><th>Usable (kWh)</th><th>Power (kW)</th><th>Capex (RM)</th><th>Saving/year (RM)</th><th>Payback</th><th>Annual ROI</th><th>Lifetime ROI</th></tr></thead>
+          <tbody>
+            {% for option in result.options %}
+            <tr>
+              <td>{{ option.units }}{% if option.units == result.units %} · selected{% endif %}</td>
+              <td>{{ "{:,.0f}".format(option.energy) }}</td>
+              <td>{{ "{:,.0f}".format(option.usable_energy) }}</td>
+              <td>{{ "{:,.0f}".format(option.power) }}</td>
+              <td>{{ "{:,.0f}".format(option.cost) }}</td>
+              <td>{{ "{:,.0f}".format(option.saving) }}</td>
+              <td>{{ option.payback_display }} years</td>
+              <td>{{ "{:.1f}%".format(option.annual_roi) }}</td>
+              <td>{{ "{:.0f}%".format(option.lifetime_roi) }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+    </section>
+    {% if chart %}
+    <section>
+      <h2>Peak-demand day and shaved peak</h2>
+      <div class="tbl"><svg viewBox="0 0 480 190" role="img" aria-label="Load on peak day and peak-shaving threshold">
+        {% for bar in chart.bars %}
+        <rect x="{{ bar.x }}" y="{{ bar.y }}" width="{{ bar.width }}" height="{{ bar.height }}" fill="var(--bar)" rx="1"/>
+        {% if bar.label %}<text x="{{ bar.x }}" y="184" font-size="10" fill="var(--mut)">{{ bar.label }}</text>{% endif %}
+        {% endfor %}
+        <line x1="0" x2="480" y1="{{ chart.threshold_y }}" y2="{{ chart.threshold_y }}" stroke="var(--thr)" stroke-width="2" stroke-dasharray="5 3"/>
+        <text x="4" y="{{ chart.threshold_y - 4 }}" font-size="10" fill="var(--thr)">shaved peak {{ "{:.0f}".format(chart.threshold) }} kW</text>
+      </svg></div>
+      <p class="note">Savings include monthly maximum-demand reduction and peak/off-peak energy shifting. The selected size is the largest count of units within the target payback.</p>
+    </section>
+    {% endif %}
+  </div>
+</main>
+<script>
+  const profiles = {{ tariff_profiles|tojson }};
+  const profileSelect = document.querySelector('#tariff-profile');
+  const rateFields = ['peak_tariff', 'offpeak_tariff', 'peak_start', 'peak_end', 'demand_charge', 'retail_charge'];
+  const profileNote = document.querySelector('#profile-note');
+  profileSelect.addEventListener('change', () => {
+    const profile = profiles[profileSelect.value];
+    for (const field of rateFields) {
+      if (profile[field] !== undefined) {
+        document.querySelector(`[name="${field}"]`).value = profile[field];
+      }
+    }
+    profileNote.textContent = profile.note;
+  });
+  for (const field of rateFields) {
+    document.querySelector(`[name="${field}"]`).addEventListener('input', () => {
+      profileSelect.value = 'custom';
+    });
+  }
+  const sizingMode = document.querySelector('[name="sizing_mode"]');
+  const unitCount = document.querySelector('[name="unit_count"]');
+  const syncUnitCount = () => unitCount.disabled = sizingMode.value !== 'fixed';
+  sizingMode.addEventListener('change', syncUnitCount);
+  syncUnitCount();
+  const target = document.querySelector('#target');
+  target.addEventListener('input', () => document.querySelector('#target-value').value = target.value);
+  const bessModel = document.querySelector('#bess-model');
+  const modelSpecs = {
+    model_216_130: {unit_kwh: 216, unit_kw: 130, price: 215000},
+    model_522_260: {unit_kwh: 522, unit_kw: 260, price: 430000},
+  };
+  bessModel.addEventListener('change', () => {
+    const specs = modelSpecs[bessModel.value];
+    if (!specs) return;
+    for (const [field, value] of Object.entries(specs)) {
+      document.querySelector(`[name="${field}"]`).value = value;
+    }
+  });
+  for (const field of ['unit_kwh', 'unit_kw', 'price']) {
+    document.querySelector(`[name="${field}"]`).addEventListener('input', () => {
+      bessModel.value = 'custom';
+    });
+  }
+</script>
+</body>
+</html>

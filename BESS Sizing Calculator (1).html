@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>BESS Sizing Calculator</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap">
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);
+--bg:#eef2f6;--card:#fff;--tx:#0b1f33;--mut:#5b6b7c;--bd:#d5dde6;--bar:#2563eb;--thr:#d97706;--bad:#b42318;--ok:#0f7a4d}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0a121b;--card:#111c28;--tx:#e6edf5;--mut:#90a0b2;--bd:#22334a;--bar:#5b9dff;--thr:#fbbf24;--bad:#f97066;--ok:#4ade80}}
+:root[data-theme="dark"]{--bg:#0a121b;--card:#111c28;--tx:#e6edf5;--mut:#90a0b2;--bd:#22334a;--bar:#5b9dff;--thr:#fbbf24;--bad:#f97066;--ok:#4ade80}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font-family:"Space Grotesk",system-ui,sans-serif;line-height:1.45}
+main{max-width:1000px;margin:0 auto;padding:20px 16px 40px;display:grid;gap:16px;grid-template-columns:minmax(0,1fr)}
+@media(min-width:820px){main{grid-template-columns:minmax(0,5fr) minmax(0,6fr)}h1{grid-column:1/-1}}
+h1{font-size:1.6rem;margin:0}h1 small{display:block;font-size:.9rem;font-weight:400;color:var(--mut)}
+h2{font-size:1rem;margin:0 0 10px}
+section{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px}
+.col{display:grid;gap:16px;align-content:start}
+label{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:.88rem;margin:6px 0}
+input[type=number]{width:96px;padding:5px 7px;border:1px solid var(--bd);border-radius:6px;background:var(--bg);color:var(--tx);font:inherit;text-align:right}
+input[type=range]{width:100%;accent-color:var(--bar)}
+.big{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
+.big div{border:1px solid var(--bd);border-radius:8px;padding:10px}
+.big b{display:block;font-size:1.55rem}.big span{font-size:.8rem;color:var(--mut)}
+textarea{width:100%;padding:6px;border:1px solid var(--bd);border-radius:6px;background:var(--bg);color:var(--tx);font:.78rem monospace}.hrs{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.hrs label{display:block;font-size:.72rem;color:var(--mut);margin:0}.hrs input{width:100%}
+button{font:inherit;font-size:.82rem;padding:5px 10px;border:1px solid var(--bd);background:var(--bg);color:var(--tx);border-radius:6px;cursor:pointer;margin-right:6px}
+button:focus-visible,input:focus-visible{outline:2px solid var(--bar);outline-offset:1px}
+#msg{font-size:.88rem;margin:10px 0 0}.bad{color:var(--bad)}.ok{color:var(--ok)}
+.tbl{overflow-x:auto}svg{width:100%;height:auto;display:block}
+.note{font-size:.76rem;color:var(--mut);margin:8px 0 0}
+</style></head>
+<body><main>
+<h1>BESS sizing calculator<small>Paste your half-hourly kW data and set a target payback; get battery size, units and ROI.</small></h1>
+
+<div class="col">
+<section><h2>Manipulating variables</h2>
+<label>Expected payback (years)<b id="pbv">5</b></label>
+<input type="range" id="pb" min="1" max="15" step="0.5" value="5" aria-label="Expected payback years">
+<h2 style="margin-top:14px">Load data (kW import)</h2>
+<p class="note" style="margin:0 0 8px">Paste the Date and kW columns from Excel, or upload a CSV. Each row: date-time (dd-mm-yy h:mm) then kW. Any interval works (30 min detected from your data).</p>
+<textarea id="paste" rows="5" placeholder="01-01-26 0:00&#9;166&#10;01-01-26 0:30&#9;150"></textarea>
+<div style="margin-top:8px"><button id="load">Use pasted data</button><button id="sample">Load sample</button><input type="file" id="file" accept=".csv,.txt,.tsv" aria-label="Upload CSV"></div>
+<p class="note" id="stat"></p></section>
+
+<section><h2>Fixed variables</h2>
+<label>Price per BESS unit (RM)<input type="number" id="price" value="120000"></label>
+<label>Unit energy (kWh)<input type="number" id="ukwh" value="100"></label>
+<label>Unit power (kW)<input type="number" id="ukw" value="50"></label>
+<label>Round-trip efficiency (%)<input type="number" id="eff" value="90"></label>
+<label>Usable depth of discharge (%)<input type="number" id="dod" value="90"></label>
+<label>Peak tariff (RM/kWh)<input type="number" id="peak" value="0.50" step="0.01"></label>
+<label>Off-peak tariff (RM/kWh)<input type="number" id="off" value="0.30" step="0.01"></label>
+<label>Peak window start hour<input type="number" id="ps" value="8" min="0" max="23"></label>
+<label>Peak window end hour<input type="number" id="pe" value="22" min="1" max="24"></label>
+<label>Maximum demand charge (RM/kW/month)<input type="number" id="dem" value="30" step="0.5"></label>
+<label>Battery life (years)<input type="number" id="life" value="10"></label>
+<p class="note">Tariffs, demand charge and unit specs are placeholders. Replace them with your quote and bill.</p></section>
+</div>
+
+<div class="col">
+<section><h2>Results</h2>
+<div class="big">
+<div><b id="o-kwh">-</b><span>BESS size (kWh)</span></div>
+<div><b id="o-units">-</b><span>Units of BESS</span></div>
+<div><b id="o-roi">-</b><span>Lifetime ROI</span></div>
+</div>
+<div class="big" style="margin-top:10px">
+<div><b id="o-kw">-</b><span>Power (kW)</span></div>
+<div><b id="o-cost">-</b><span>Capex (RM)</span></div>
+<div><b id="o-sav">-</b><span>Saving per year (RM)</span></div>
+<div><b id="o-pb">-</b><span>Payback (years)</span></div>
+<div><b id="o-aroi">-</b><span>Annual ROI</span></div>
+</div>
+<p id="msg"></p></section>
+
+<section><h2>Peak-demand day and shaved peak</h2>
+<div class="tbl"><svg id="chart" viewBox="0 0 480 190" role="img" aria-label="Load on the peak day with peak-shaving threshold"></svg></div>
+<p class="note">Saving = demand charge from shaving the peak + peak/off-peak energy shift. Battery is sized to the largest count whose average payback stays within your target, so you get the most annual saving inside that limit.</p></section>
+</div>
+</main>
+<script>
+const $=id=>document.getElementById(id),v=id=>+$(id).value;
+const SAMPLE=[166,150,111,111,109,110,106,106,107,106,106,106,107,106,172,465,562,570,522,494,562,433,265,283,112,118,271,342,211,247,306,284,377,388,477,501,500,460,400,340,290,250,220,200,190,180,170,160];
+let days=[],dt=.5,mx=0,pkDay=[],mo=1;
+function parse(txt){
+  const re=/(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2,4})[ T]+(\d{1,2}):(\d{2})/,g={};
+  for(const line of txt.split(/\r?\n/)){
+    const m=line.match(re);if(!m)continue;
+    const k=line.slice(m.index+m[0].length).replace(/^:\d{2}/,"").replace(/"/g,"").match(/-?\d[\d,]*\.?\d*/);
+    if(!k)continue;const kw=parseFloat(k[0].replace(/,/g,""));if(isNaN(kw))continue;
+    let y=+m[3];if(y<100)y+=2000;
+    const key=y*10000+(+m[2])*100+(+m[1]);
+    (g[key]=g[key]||[]).push({t:+m[4]+m[5]/60,kw});
+  }
+  days=Object.values(g).map(d=>d.sort((a,b)=>a.t-b.t));
+  const d0=days.find(d=>d.length>1);dt=.5;
+  if(d0){let m=99;for(let i=1;i<d0.length;i++){const x=d0[i].t-d0[i-1].t;if(x>0&&x<m)m=x}if(m<99)dt=m}
+  mx=0;pkDay=[];days.forEach(d=>d.forEach(x=>{if(x.kw>mx){mx=x.kw;pkDay=d}}));
+  const n=days.reduce((s,d)=>s+d.length,0),kwh=days.reduce((s,d)=>s+d.reduce((a,x)=>a+x.kw*dt,0),0);
+  $("stat").textContent=n?n+" readings, "+days.length+" day(s), "+Math.round(dt*60)+"-min interval, peak "+mx.toFixed(0)+" kW, average "+Math.round(kwh/days.length).toLocaleString()+" kWh/day"+(days.length<28?". Under a month of data: results assume these days repeat all year.":"."):"No valid rows found. Expected a date-time like 01-01-26 0:30 followed by kW.";
+  run();
+}
+function sample(){let t="";SAMPLE.forEach((k,i)=>t+="01-01-26 "+Math.floor(i/2)+":"+(i%2?"30":"00")+"\t"+k+"\n");$("paste").value=t;parse(t)}
+$("sample").onclick=sample;$("load").onclick=()=>parse($("paste").value);
+$("file").onchange=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{$("paste").value=r.result.slice(0,200000);parse(r.result)};r.readAsText(f)};
+
+function calc(n,p){
+  const E=n*p.ukwh*p.dod,Pw=n*p.ukw;
+  const over=T=>{let w=0;for(const d of days){let s=0;for(const x of d)if(x.kw>T)s+=x.kw-T;s*=dt;if(s>w)w=s}return w};
+  let lo=Math.max(0,mx-Pw),hi=mx;
+  if(over(lo)>E){for(let i=0;i<40;i++){const m=(lo+hi)/2;over(m)>E?lo=m:hi=m}lo=hi}
+  const T=lo,dem=(mx-T)*p.dem*12;
+  let arb=0;
+  for(const d of days){let pk=0;for(const x of d)if(x.t>=p.ps&&x.t<p.pe)pk+=x.kw*dt;const q=Math.min(E,pk);arb+=q*p.peak-q/p.eff*p.off}
+  arb=arb/days.length*365;
+  const S=dem+arb,C=n*p.price;
+  return{n,S,C,T,pb:S>0?C/S:Infinity}
+}
+function run(){
+  if(!days.length)return;
+  const p={ukwh:v("ukwh"),ukw:v("ukw"),price:v("price"),eff:v("eff")/100,dod:v("dod")/100,peak:v("peak"),off:v("off"),ps:v("ps"),pe:v("pe"),dem:v("dem"),life:v("life")};
+  const target=v("pb");$("pbv").textContent=target;
+  let best=null,minr=null;
+  for(let n=1;n<=200;n++){const r=calc(n,p);if(!minr||r.pb<minr.pb)minr=r;if(r.pb<=target)best=r}
+  const r=best||minr,ok=!!best,f=x=>Math.round(x).toLocaleString();
+  $("o-kwh").textContent=f(r.n*p.ukwh);$("o-units").textContent=r.n;
+  $("o-kw").textContent=f(r.n*p.ukw);$("o-cost").textContent=f(r.C);$("o-sav").textContent=f(r.S);
+  $("o-pb").textContent=isFinite(r.pb)?r.pb.toFixed(1):"n/a";
+  $("o-roi").textContent=(((r.S*p.life-r.C)/r.C)*100).toFixed(0)+"%";
+  $("o-aroi").textContent=((r.S/r.C)*100).toFixed(1)+"%";
+  const m=$("msg");m.className=ok?"ok":"bad";
+  m.textContent=ok?"Meets your "+target+"-year target. Peak shaved from "+mx.toFixed(0)+" kW to "+r.T.toFixed(0)+" kW.":"No size pays back within "+target+" years. Showing the best case ("+(isFinite(r.pb)?r.pb.toFixed(1):"n/a")+" years). Raise the target, lower unit price, or check the demand charge.";
+  draw(r);
+}
+function draw(r){
+  const W=480,H=190,b=22,t=10,M=mx*1.1||1,bw=W/pkDay.length;let s="";
+  pkDay.forEach((x,i)=>{const h=x.kw/M*(H-b-t);s+=`<rect x="${i*bw+1}" y="${H-b-h}" width="${Math.max(bw-2,1)}" height="${h}" fill="var(--bar)" rx="1"/>`;
+    if(i%Math.ceil(pkDay.length/8)==0)s+=`<text x="${i*bw}" y="${H-6}" font-size="10" fill="var(--mut)">${Math.floor(x.t)}h</text>`});
+  const y=H-b-r.T/M*(H-b-t);
+  s+=`<line x1="0" x2="${W}" y1="${y}" y2="${y}" stroke="var(--thr)" stroke-width="2" stroke-dasharray="5 3"/><text x="4" y="${y-4}" font-size="10" fill="var(--thr)">shaved peak ${r.T.toFixed(0)} kW</text>`;
+  $("chart").innerHTML=s;
+}
+document.querySelectorAll("input:not([type=file])").forEach(e=>e.addEventListener("input",run));
+sample();
+</script></body></html>
