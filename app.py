@@ -723,34 +723,37 @@ def main() -> None:
         [data-testid="stHeader"] { background: transparent; }
         [data-testid="stMainBlockContainer"] { max-width: 1440px; padding: 1.25rem 1.4rem 2.5rem; }
         [data-testid="stMarkdownContainer"] { color: #26363d; }
-        [data-testid="stMarkdownContainer"] p { font-size: .9rem; line-height: 1.45; }
-        h1 { color: #172b33; font-size: 1.8rem !important; font-weight: 700 !important; margin: 0 0 .2rem; }
-        h2, h3 { color: #20343c; font-size: 1.08rem !important; font-weight: 650 !important; margin-bottom: .55rem !important; }
+        [data-testid="stMarkdownContainer"] p { font-size: 1rem; line-height: 1.5; }
+        h1 { color: #172b33; font-size: 1.9rem !important; font-weight: 700 !important; margin: 0 0 .2rem; }
+        h2, h3 { color: #20343c; font-size: 1.2rem !important; font-weight: 650 !important; margin-bottom: .55rem !important; }
         [data-testid="stVerticalBlockBorderWrapper"],
         [data-testid="stVerticalBlockBorderWrapper"] > div,
         [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stVerticalBlock"] { background: #fff !important; background-image: none !important; border-color: #c5d1d1; border-radius: 7px; box-shadow: 0 2px 8px rgba(22, 48, 54, .08); }
         .st-key-load-input-panel, .st-key-results-panel,
         .st-key-load-input-panel [data-testid="stVerticalBlock"],
-        .st-key-results-panel [data-testid="stVerticalBlock"] { background-color: #fff !important; background-image: none !important; }
+        .st-key-results-panel [data-testid="stVerticalBlock"],
+        .st-key-settings-panel, .st-key-peak-chart-panel,
+        .st-key-settings-panel [data-testid="stVerticalBlock"],
+        .st-key-peak-chart-panel [data-testid="stVerticalBlock"] { background-color: #fff !important; background-image: none !important; }
         [data-testid="stMetric"] { background: #fff !important; border: 1px solid #d0dadb; border-radius: 6px; padding: .55rem .65rem; min-height: 72px; }
-        [data-testid="stMetricLabel"] { color: #52666c; font-size: .78rem; }
-        [data-testid="stMetricValue"] { color: #183b43; font-size: 1.2rem; font-weight: 650; }
-        .setting-label { color: #30464e; font-size: .86rem; line-height: 1.3; padding: .4rem 0; }
-        [data-testid="stCaptionContainer"] { color: #52666c; font-size: .8rem; line-height: 1.45; }
-        [data-testid="stWidgetLabel"] p { color: #30464e; font-size: .84rem; }
+        [data-testid="stMetricLabel"] { color: #52666c; font-size: .9rem; }
+        [data-testid="stMetricValue"] { color: #183b43; font-size: 1.35rem; font-weight: 650; }
+        .setting-label { color: #30464e; font-size: .98rem; line-height: 1.4; padding: .4rem 0; }
+        [data-testid="stCaptionContainer"] { color: #52666c; font-size: .92rem; line-height: 1.5; }
+        [data-testid="stWidgetLabel"] p { color: #30464e; font-size: .95rem; }
         [data-testid="stTextInput"] input, [data-testid="stNumberInput"] input,
         [data-testid="stSelectbox"] [data-baseweb="select"] > div,
-        [data-testid="stTextArea"] textarea { background: #fff; border-color: #bdccce; }
+        [data-testid="stTextArea"] textarea { background: #fff; border-color: #bdccce; font-size: 1rem; }
         [data-testid="stNumberInput"] button { display: none !important; }
         [data-testid="stBaseButton-primary"] { background: #13766d; border-color: #13766d; color: #fff; }
         [data-testid="stBaseButton-primary"]:hover { background: #0d625a; border-color: #0d625a; color: #fff; }
         [data-testid="stAlert"] { border-radius: 6px; }
-        [data-testid="stAlert"] p { font-size: .88rem; line-height: 1.4; }
+        [data-testid="stAlert"] p { font-size: .98rem; line-height: 1.5; }
         [data-testid="stHorizontalBlock"] { gap: .65rem; }
-        [data-testid="stDataFrame"] { font-size: .82rem; }
+        [data-testid="stDataFrame"] { font-size: .92rem; }
         @media (max-width: 700px) {
             [data-testid="stMainBlockContainer"] { padding: 1rem .8rem 2rem; }
-            h1 { font-size: 1.55rem !important; }
+            h1 { font-size: 1.65rem !important; }
         }
         </style>
     """, unsafe_allow_html=True)
@@ -781,7 +784,7 @@ def main() -> None:
                 "Load data", value=SAMPLE_TEXT, height=120, label_visibility="collapsed",
             )
             calculate_clicked = st.button("Calculate", type="primary", width="content")
-        with st.container(border=True):
+        with st.container(border=True, key="settings-panel"):
             render_settings(st)
 
     with output_column:
@@ -798,7 +801,7 @@ def main() -> None:
                 if not st.session_state.calculation.get("error"):
                     st.session_state.selected_option_units = st.session_state.calculation["result"]["units"]
             selected_result = render_results(st.session_state.calculation)
-        with st.container(border=True):
+        with st.container(border=True, key="peak-chart-panel"):
             render_peak_chart(st.session_state.calculation, selected_result)
 
 
