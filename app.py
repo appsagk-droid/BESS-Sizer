@@ -6,10 +6,8 @@ from collections import defaultdict
 from datetime import date
 from typing import Any
 
-from flask import Flask, render_template, request
-
-app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 200_000
+import altair as alt
+import streamlit as st
 
 SAMPLE = [
     166, 150, 111, 111, 109, 110, 106, 106, 107, 106, 106, 106,
@@ -22,7 +20,7 @@ SAMPLE_TEXT = "\n".join(
     for index, load in enumerate(SAMPLE)
 )
 DEFAULTS = {
-    "target": 5,
+    "target": 3,
     "price": 430000,
     "unit_kwh": 522,
     "unit_kw": 260,
@@ -37,6 +35,10 @@ DEFAULTS = {
     "retail_charge": 0,
     "life": 10,
 }
+REFERENCE_CAPACITY_KWH = [
+    455.39, 438.08, 430.88, 424.89, 417.54,
+    410.57, 403.96, 397.21, 390.18, 378.68,
+]
 TARIFF_PROFILES = {
     "custom": {
         "label": "Custom rates",
@@ -163,11 +165,10 @@ def calculate(days: list[list[dict[str, Any]]], interval: float,
             if settings["demand_period"] == "all" or is_tou_peak(reading, settings):
                 month = reading["date"][:7]
                 demand_peaks[month] = max(demand_peaks[month], reading["kw"])
-    billable_months = max(len(demand_peaks), 1)
     shaving_peak = max(demand_peaks.values(), default=0)
 
-    def size_for(units: int) -> dict[str, float | int]:
-        energy = units * settings["unit_kwh"] * settings["dod"]
+    def performance_for(units: int, capacity_retention: float) -> dict[str, float]:
+        energy = units * settings["unit_kwh"] * settings["dod"] * capacity_retention
         power = units * settings["unit_kw"]
 
         def maximum_daily_energy(threshold: float) -> float:
@@ -189,32 +190,58 @@ def calculate(days: list[list[dict[str, Any]]], interval: float,
                     high = midpoint
             low = high
 
-        demand_saving = (
-            sum(max(month_peak - low, 0) for month_peak in demand_peaks.values())
-            / billable_months * 12 * settings["demand_charge"]
-        )
-        arbitrage = 0
-        for readings in days:
-            peak_energy = sum(
-                reading["kw"] * interval for reading in readings
-                if settings["tou"] and is_tou_peak(reading, settings)
-            )
-            shifted_energy = min(energy, peak_energy)
-            daily_arbitrage = (
-                shifted_energy * settings["peak_tariff"]
-                - shifted_energy / settings["efficiency"] * settings["offpeak_tariff"]
-            )
-            arbitrage += max(daily_arbitrage, 0)
-        annual_saving = demand_saving + arbitrage / len(days) * 365
+        shaving_amount = max(shaving_peak - low, 0)
+        demand_saving = shaving_amount * settings["demand_charge"] * 12
+        return {
+            "saving": demand_saving,
+            "threshold": low,
+            "monthly_md_saving": demand_saving,
+        }
+
+    def size_for(units: int) -> dict[str, Any]:
         cost = units * settings["price"]
+        cumulative_saving = 0.0
+        elapsed_years = 0.0
+        payback = math.inf
+        capacity_retention = 1.0
+        projection = []
+        year_count = math.ceil(settings["life"])
+
+        for year in range(1, year_count + 1):
+            duration = min(1.0, settings["life"] - (year - 1))
+            reference_capacity = REFERENCE_CAPACITY_KWH[min(year - 1, len(REFERENCE_CAPACITY_KWH) - 1)]
+            capacity_retention = reference_capacity / 522
+            performance = performance_for(units, capacity_retention)
+            annual_saving = performance["saving"]
+            year_saving = annual_saving * duration
+            if math.isinf(payback) and annual_saving > 0 and cumulative_saving + year_saving >= cost:
+                payback = elapsed_years + (cost - cumulative_saving) / annual_saving
+            cumulative_saving += year_saving
+            elapsed_years += duration
+            projection.append({
+                "year": year,
+                "capacity_retention": capacity_retention,
+                "usable_energy": units * settings["unit_kwh"] * settings["dod"] * capacity_retention,
+                "available_power": units * settings["unit_kw"],
+                "threshold": performance["threshold"],
+                "shaving_amount": max(shaving_peak - performance["threshold"], 0),
+                "annual_saving": annual_saving,
+                "monthly_md_saving": performance["monthly_md_saving"],
+                "cumulative_saving": cumulative_saving,
+            })
+
+        first_year = projection[0]
         return {
             "units": units,
-            "saving": annual_saving,
+            "saving": first_year["annual_saving"],
+            "lifetime_saving": cumulative_saving,
             "cost": cost,
-            "threshold": low,
+            "threshold": first_year["threshold"],
             "demand_peak": shaving_peak,
-            "monthly_md_saving": demand_saving,
-            "payback": cost / annual_saving if annual_saving > 0 else math.inf,
+            "shaving_amount": first_year["shaving_amount"],
+            "monthly_md_saving": first_year["monthly_md_saving"],
+            "payback": payback,
+            "yearly_projection": projection,
         }
 
     def add_metrics(candidate: dict[str, Any]) -> dict[str, Any]:
@@ -224,10 +251,10 @@ def calculate(days: list[list[dict[str, Any]]], interval: float,
         )
         candidate["energy"] = candidate["units"] * settings["unit_kwh"]
         candidate["power"] = candidate["units"] * settings["unit_kw"]
-        candidate["usable_energy"] = candidate["energy"] * settings["dod"]
+        candidate["usable_energy"] = candidate["yearly_projection"][0]["usable_energy"]
         candidate["annual_roi"] = candidate["saving"] / candidate["cost"] * 100
         candidate["lifetime_roi"] = (
-            (candidate["saving"] * settings["life"] - candidate["cost"])
+            (candidate["lifetime_saving"] - candidate["cost"])
             / candidate["cost"] * 100
         )
         candidate["met_target"] = candidate["payback"] <= settings["target"]
@@ -334,83 +361,446 @@ def make_chart(readings: list[dict[str, float]], peak: float,
     }
 
 
-@app.route("/", methods=["GET", "POST"])
-def index():
-    form_values = {name: str(value) for name, value in DEFAULTS.items()}
-    form_values["tariff_profile"] = "custom"
-    form_values["bess_model"] = "model_522_260"
-    form_values["sizing_mode"] = "automatic"
-    form_values["public_holidays"] = ""
-    data_text = SAMPLE_TEXT
-    error = None
-    if request.method == "POST":
-        form_values.update({name: request.form.get(name, str(value))
-                            for name, value in DEFAULTS.items()})
-        form_values["tariff_profile"] = request.form.get("tariff_profile", "custom")
-        form_values["bess_model"] = request.form.get("bess_model", "custom")
-        form_values["sizing_mode"] = request.form.get("sizing_mode", "automatic")
-        form_values["public_holidays"] = request.form.get("public_holidays", "")
-        selected_profile = TARIFF_PROFILES.get(
-            form_values["tariff_profile"], TARIFF_PROFILES["custom"]
-        )
-        if form_values["tariff_profile"] != "custom":
-            for name in DEFAULTS:
-                if name in selected_profile:
-                    form_values[name] = str(selected_profile[name])
-        data_text = request.form.get("data", "")
-        uploaded_file = request.files.get("file")
-        if uploaded_file and uploaded_file.filename:
-            try:
-                data_text = uploaded_file.read().decode("utf-8-sig")
-            except UnicodeDecodeError:
-                error = "The uploaded file must be a UTF-8 CSV or text file."
+def apply_tariff_profile() -> None:
+    profile = TARIFF_PROFILES[st.session_state.tariff_profile]
+    for name in DEFAULTS:
+        if name in profile:
+            st.session_state[name] = profile[name]
 
-    settings = {name: float(value) for name, value in DEFAULTS.items()}
-    result = None
-    chart = None
-    stats = None
-    days, interval, peak = parse_data(data_text)
-    if not error:
-        try:
-            settings = read_settings(form_values)
-        except ValueError as exc:
-            error = str(exc)
 
-    if not error and not days:
-        error = "No valid rows found. Expected a date-time like 01-01-26 0:30 followed by kW."
-    if not error:
-        reading_count = sum(map(len, days))
-        daily_energy = sum(
-            sum(reading["kw"] * interval for reading in readings) for readings in days
-        ) / len(days)
-        stats = (f"{reading_count:,} readings, {len(days)} day(s), "
-                 f"{round(interval * 60)}-min interval, peak {peak:.0f} kW, "
-                 f"average {daily_energy:,.0f} kWh/day")
-        result = calculate(days, interval, peak, settings)
-        demand_days = [
-            readings for readings in days
-            if any(not settings["tou"] or is_tou_peak(reading, settings) for reading in readings)
-        ]
-        peak_day = max(
-            demand_days or days,
-            key=lambda readings: max(
-                (reading["kw"] for reading in readings
-                 if not settings["tou"] or is_tou_peak(reading, settings)),
-                default=max(reading["kw"] for reading in readings),
-            ),
-        )
-        chart_peak = max(reading["kw"] for reading in peak_day)
-        chart = make_chart(peak_day, chart_peak, result["threshold"])
+def apply_bess_model() -> None:
+    model_specs = {
+        "model_216_130": {"unit_kwh": 216, "unit_kw": 130, "price": 215000},
+        "model_522_260": {"unit_kwh": 522, "unit_kw": 260, "price": 430000},
+    }
+    for name, value in model_specs.get(st.session_state.bess_model, {}).items():
+        st.session_state[name] = value
 
-    return render_template(
-        "index.html", defaults=DEFAULTS, values=form_values, data=data_text,
-        tariff_profiles=TARIFF_PROFILES,
-        tariff_note=TARIFF_PROFILES.get(form_values["tariff_profile"], TARIFF_PROFILES["custom"])["note"],
-        stats=stats, day_count=len(days), result=result, chart=chart, peak=peak,
-        error=error, target=settings["target"],
-        sizing_mode=settings["sizing_mode"],
+
+def mark_custom_tariff() -> None:
+    st.session_state.tariff_profile = "custom"
+
+
+def mark_custom_model() -> None:
+    st.session_state.bess_model = "custom"
+
+
+def update_simulated_load_peak() -> None:
+    load_peak = st.session_state.simulation_load_peak
+    shaved_peak = min(st.session_state.simulation_shaved_peak, load_peak)
+    st.session_state.simulation_shaved_peak = shaved_peak
+    st.session_state.simulation_shaving_amount = load_peak - shaved_peak
+
+
+def update_simulated_shaved_peak() -> None:
+    load_peak = st.session_state.simulation_load_peak
+    shaved_peak = min(st.session_state.simulation_shaved_peak, load_peak)
+    st.session_state.simulation_shaved_peak = shaved_peak
+    st.session_state.simulation_shaving_amount = load_peak - shaved_peak
+
+
+def update_simulated_shaving_amount() -> None:
+    load_peak = st.session_state.simulation_load_peak
+    amount = min(st.session_state.simulation_shaving_amount, load_peak)
+    st.session_state.simulation_shaving_amount = amount
+    st.session_state.simulation_shaved_peak = load_peak - amount
+
+
+def render_number_setting(
+    panel: Any, label: str, key: str, *, min_value: float | int | None = None,
+    max_value: float | int | None = None, step: float | int | None = None,
+    disabled: bool = False, on_change: Any = None,
+) -> None:
+    label_column, input_column = panel.columns([1.2, 0.9], vertical_alignment="center")
+    label_column.markdown(f"<div class='setting-label'>{label}</div>", unsafe_allow_html=True)
+    kwargs = {name: value for name, value in {
+        "min_value": min_value,
+        "max_value": max_value,
+        "step": step,
+        "disabled": disabled,
+        "on_change": on_change,
+    }.items() if value is not None}
+    input_column.number_input(label, key=key, label_visibility="collapsed", **kwargs)
+
+
+def render_select_setting(
+    panel: Any, label: str, options: list[str], key: str,
+    *, format_func: Any = None, on_change: Any = None,
+) -> None:
+    label_column, input_column = panel.columns([1.2, 0.9], vertical_alignment="center")
+    label_column.markdown(f"<div class='setting-label'>{label}</div>", unsafe_allow_html=True)
+    input_column.selectbox(
+        label, options, key=key, format_func=format_func,
+        on_change=on_change, label_visibility="collapsed",
     )
 
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8001)
+def render_settings(panel: Any) -> None:
+    for name, value in DEFAULTS.items():
+        st.session_state.setdefault(name, value)
+    st.session_state.setdefault("tariff_profile", "custom")
+    st.session_state.setdefault("bess_model", "model_522_260")
+    st.session_state.setdefault("sizing_mode", "automatic")
+    st.session_state.setdefault("public_holidays", "")
+
+    panel.subheader("Fixed variables")
+    short_tariff_labels = {
+        "custom": "Custom rates",
+        "domestic_tou_under_1500": "Domestic ToU <= 1,500 kWh",
+        "domestic_tou_over_1500": "Domestic ToU > 1,500 kWh",
+        "domestic_standard": "Domestic standard",
+        "lv_general": "LV general",
+        "lv_tou": "LV ToU",
+        "mv_general": "MV general",
+        "mv_tou": "MV ToU",
+        "hv_tou": "HV ToU",
+    }
+    render_select_setting(
+        panel, "Malaysia tariff profile", list(TARIFF_PROFILES), "tariff_profile",
+        format_func=lambda key: short_tariff_labels[key], on_change=apply_tariff_profile,
+    )
+    profile = TARIFF_PROFILES[st.session_state.tariff_profile]
+    panel.markdown(f"**{profile['label']}**")
+    panel.caption(profile["note"])
+    tariff_rates = panel.columns(2)
+    tariff_rates[0].markdown(f"**Peak energy**  \nRM {st.session_state.peak_tariff:.4f}/kWh")
+    tariff_rates[1].markdown(f"**Off-peak energy**  \nRM {st.session_state.offpeak_tariff:.4f}/kWh")
+    tariff_rates = panel.columns(2)
+    tariff_rates[0].markdown(f"**Demand charge**  \nRM {st.session_state.demand_charge:,.2f}/kW/month")
+    tariff_rates[1].markdown(f"**Retail charge**  \nRM {st.session_state.retail_charge:,.2f}/month")
+    render_select_setting(
+        panel, "BESS model",
+        ["model_216_130", "model_522_260", "custom"],
+        format_func=lambda key: {
+            "model_216_130": "216 kWh / 130 kW",
+            "model_522_260": "522 kWh / 260 kW",
+            "custom": "Custom specs",
+        }[key],
+        key="bess_model", on_change=apply_bess_model,
+    )
+    render_number_setting(panel, "Price per BESS unit (RM)", "price", min_value=0.01, on_change=mark_custom_model)
+    render_number_setting(panel, "Unit energy (kWh)", "unit_kwh", min_value=0.01, on_change=mark_custom_model)
+    render_number_setting(panel, "Unit power (kW)", "unit_kw", min_value=0.01, on_change=mark_custom_model)
+    render_select_setting(
+        panel, "BESS sizing mode", ["automatic", "fixed"], "sizing_mode",
+        format_func=lambda mode: "Optimize to payback target" if mode == "automatic" else "Set number of units",
+    )
+    render_number_setting(
+        panel, "Number of BESS units", "unit_count", min_value=1, max_value=200,
+        step=1, disabled=st.session_state.sizing_mode != "fixed",
+    )
+    render_number_setting(panel, "Round-trip efficiency (%)", "efficiency", min_value=0.01, max_value=100.0)
+    render_number_setting(panel, "Usable depth of discharge (%)", "dod", min_value=0.01, max_value=100.0)
+    panel.caption("Battery capacity follows the fixed reference degradation profile; rated kW power does not degrade.")
+    render_number_setting(panel, "Peak tariff (RM/kWh)", "peak_tariff", min_value=0.0, on_change=mark_custom_tariff)
+    render_number_setting(panel, "Off-peak tariff (RM/kWh)", "offpeak_tariff", min_value=0.0, on_change=mark_custom_tariff)
+    render_number_setting(panel, "Peak window start hour", "peak_start", min_value=0, max_value=23, step=1, on_change=mark_custom_tariff)
+    render_number_setting(panel, "Peak window end hour", "peak_end", min_value=1, max_value=24, step=1, on_change=mark_custom_tariff)
+    render_number_setting(panel, "Maximum demand charge (RM/kW/month)", "demand_charge", min_value=0.0, on_change=mark_custom_tariff)
+    render_number_setting(panel, "Retail charge (RM/month)", "retail_charge", min_value=0.0, on_change=mark_custom_tariff)
+    render_number_setting(panel, "Battery life (years)", "life", min_value=0.01)
+    panel.text_area(
+        "Public holidays (one dd-mm-yyyy date per line)", key="public_holidays",
+        placeholder="01-05-26\n31-08-26", height=70,
+    )
+    if profile.get("requires_energy_rates"):
+        panel.info("Enter the high-voltage ToU energy rates from your bill.")
+
+
+def calculate_from_inputs(data_text: str, uploaded_data: str | None) -> dict[str, Any]:
+    if uploaded_data is not None:
+        data_text = uploaded_data
+    settings_input = {name: str(st.session_state[name]) for name in DEFAULTS}
+    settings_input.update({
+        "tariff_profile": st.session_state.tariff_profile,
+        "sizing_mode": st.session_state.sizing_mode,
+        "public_holidays": st.session_state.public_holidays,
+    })
+    try:
+        settings = read_settings(settings_input)
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+    days, interval, peak = parse_data(data_text)
+    if not days:
+        return {"error": "No valid rows found. Expected a date-time like 01-01-26 0:30 followed by kW."}
+
+    reading_count = sum(map(len, days))
+    daily_energy = sum(
+        sum(reading["kw"] * interval for reading in readings) for readings in days
+    ) / len(days)
+    stats = (f"{reading_count:,} readings, {len(days)} day(s), "
+             f"{round(interval * 60)}-min interval, peak {peak:.0f} kW, "
+             f"average {daily_energy:,.0f} kWh/day")
+    result = calculate(days, interval, peak, settings)
+    demand_days = [
+        readings for readings in days
+        if any(not settings["tou"] or is_tou_peak(reading, settings) for reading in readings)
+    ]
+    peak_day = max(
+        demand_days or days,
+        key=lambda readings: max(
+            (reading["kw"] for reading in readings
+             if not settings["tou"] or is_tou_peak(reading, settings)),
+            default=max(reading["kw"] for reading in readings),
+        ),
+    )
+    return {
+        "result": result,
+        "settings": settings,
+        "stats": stats,
+        "day_count": len(days),
+        "peak_day": peak_day,
+        "peak": peak,
+    }
+
+
+def render_results(calculation: dict[str, Any]) -> dict[str, Any] | None:
+    if calculation.get("error"):
+        st.error(calculation["error"])
+        return None
+
+    recommendation = calculation["result"]
+    settings = calculation["settings"]
+    st.caption(calculation["stats"])
+    if calculation["day_count"] < 28:
+        st.warning("Under a month of data: results assume these days repeat throughout the year.")
+
+    st.markdown("**Suggested BESS options**")
+    options = recommendation["options"]
+    option_rows = [{
+        "Units": option["units"],
+        "Rated (kWh)": f"{option['energy']:,.0f}",
+        "Usable (kWh)": f"{option['usable_energy']:,.0f}",
+        "Power (kW)": f"{option['power']:,.0f}",
+        "Capex (RM)": f"{option['cost']:,.0f}",
+        "Year 1 saving (RM)": f"{option['saving']:,.0f}",
+        "Payback (years)": option["payback_display"],
+        "Annual ROI": f"{option['annual_roi']:.1f}%",
+        "Lifetime ROI": f"{option['lifetime_roi']:.1f}%",
+    } for option in options]
+    table_event = st.dataframe(
+        option_rows, hide_index=True, width="stretch", height=220,
+        key="suggested_options_table", on_select="rerun", selection_mode="single-row",
+    )
+    selected_rows = table_event.selection.rows
+    selected_units = (
+        options[selected_rows[0]]["units"] if selected_rows
+        else st.session_state.get("selected_option_units", recommendation["units"])
+    )
+    if selected_units not in {option["units"] for option in options}:
+        selected_units = recommendation["units"]
+    st.session_state.selected_option_units = selected_units
+    result = next(option for option in options if option["units"] == selected_units)
+
+    first_row = st.columns(3)
+    first_row[0].metric("BESS size", f"{result['energy']:,.0f} kWh")
+    first_row[1].metric("Units", str(result["units"]))
+    first_row[2].metric("Lifetime ROI", f"{result['lifetime_roi']:.0f}%")
+    second_row = st.columns(3)
+    second_row[0].metric("Power", f"{result['power']:,.0f} kW")
+    second_row[1].metric("Capital cost", f"RM {result['cost']:,.0f}")
+    second_row[2].metric("Year 1 saving", f"RM {result['saving']:,.0f}")
+    third_row = st.columns(2)
+    third_row[0].metric("Payback", f"{result['payback_display']} years")
+    third_row[1].metric("Annual ROI", f"{result['annual_roi']:.1f}%")
+
+    if result["met_target"]:
+        st.success(
+            f"Meets the {settings['target']:g}-year target. Tariff-period peak shaved "
+            f"from {result['demand_peak']:.0f} kW to {result['threshold']:.0f} kW."
+        )
+    elif settings["sizing_mode"] == "fixed":
+        st.warning(
+            f"The selected {result['units']}-unit system exceeds the "
+            f"{settings['target']:g}-year payback target ({result['payback_display']} years)."
+        )
+    else:
+        st.warning(
+            f"No size pays back within {settings['target']:g} years. "
+            f"Showing the best case ({result['payback_display']} years)."
+        )
+
+    st.caption(
+        f"Lifetime ROI sums yearly savings over {settings['life']:g} years after battery degradation; "
+        "financing and replacement costs are excluded."
+    )
+    st.subheader("Degradation-adjusted yearly projection")
+    projection_rows = [{
+        "Year": year["year"],
+        "Shaving amount (kW)": f"{year['shaving_amount']:,.1f}",
+        "Annual saving (RM)": f"{year['annual_saving']:,.0f}",
+    } for year in result["yearly_projection"]]
+    st.dataframe(projection_rows, hide_index=True, width="stretch", height=260)
+    return result
+
+
+def render_peak_chart(calculation: dict[str, Any], result: dict[str, Any] | None) -> None:
+    if calculation.get("error") or result is None:
+        return
+    peak_day = calculation["peak_day"]
+    actual_peak = max(reading["kw"] for reading in peak_day)
+    maximum_input = max(actual_peak * 5, 1000)
+    if st.session_state.get("simulation_selected_units") != result["units"]:
+        st.session_state.simulation_load_peak = actual_peak
+        st.session_state.simulation_shaved_peak = min(result["threshold"], actual_peak)
+        st.session_state.simulation_shaving_amount = max(
+            st.session_state.simulation_load_peak - st.session_state.simulation_shaved_peak, 0,
+        )
+        st.session_state.simulation_selected_units = result["units"]
+    else:
+        st.session_state.setdefault("simulation_load_peak", actual_peak)
+        st.session_state.setdefault("simulation_shaved_peak", min(result["threshold"], actual_peak))
+        st.session_state.setdefault(
+            "simulation_shaving_amount",
+            max(st.session_state.simulation_load_peak - st.session_state.simulation_shaved_peak, 0),
+        )
+    peak_boxes = st.columns(3)
+    peak_boxes[0].number_input(
+        "Load peak (kW)", min_value=0.0, max_value=maximum_input,
+        step=0.1, key="simulation_load_peak", on_change=update_simulated_load_peak,
+    )
+    peak_boxes[1].number_input(
+        "Shaved peak (kW)", min_value=0.0, max_value=maximum_input,
+        step=0.1, key="simulation_shaved_peak", on_change=update_simulated_shaved_peak,
+    )
+    peak_boxes[2].number_input(
+        "Shaving amount (kW)", min_value=0.0, max_value=maximum_input,
+        step=0.1, key="simulation_shaving_amount", on_change=update_simulated_shaving_amount,
+    )
+    simulation_load_peak = st.session_state.simulation_load_peak
+    peak_limit = st.session_state.simulation_shaved_peak
+    maximum_shaved = st.session_state.simulation_shaving_amount
+    load_scale = simulation_load_peak / actual_peak if actual_peak > 0 else 1
+    chart_data = [{
+        "time": reading["time"],
+        "load": reading["kw"] * load_scale,
+    } for reading in peak_day]
+    load_bars = alt.Chart(alt.Data(values=chart_data)).mark_bar(
+        color="#2877c7", size=12, opacity=0.9,
+    ).encode(
+        x=alt.X(
+            "time:Q", title="Time of day",
+            axis=alt.Axis(values=list(range(0, 25, 3)), labelExpr="datum.value + 'h'"),
+            scale=alt.Scale(domain=[0, 24]),
+        ),
+        y=alt.Y("load:Q", title="Load (kW)", scale=alt.Scale(zero=True)),
+        tooltip=[
+            alt.Tooltip("time:Q", title="Hour", format=".1f"),
+            alt.Tooltip("load:Q", title="Load (kW)", format=".1f"),
+        ],
+    )
+    peak_line = alt.Chart().mark_rule(
+        color="#d97706", strokeDash=[7, 4], strokeWidth=2,
+    ).encode(y=alt.datum(peak_limit))
+    chart = alt.layer(load_bars, peak_line).properties(height=300).configure(
+        background="#ffffff",
+    ).configure_view(
+        stroke="transparent",
+    ).configure_axis(
+        labelColor="#52666c", titleColor="#30464e", gridColor="#e7ecee",
+    )
+    legend = st.columns(2)
+    legend[0].markdown(
+        "<span style='color:#2877c7;font-weight:700'>■</span> Load (bars)",
+        unsafe_allow_html=True,
+    )
+    legend[1].markdown(
+        "<span style='color:#d97706;font-weight:700'>━</span> Shaved peak (line)",
+        unsafe_allow_html=True,
+    )
+    st.altair_chart(chart, width="stretch")
+    st.markdown(f"**Maximum shaved amount: {maximum_shaved:,.1f} kW**")
+    st.caption("Adjusting load peak rescales the plotted profile proportionally. To update financial results, edit the interval data above and calculate again.")
+
+
+def main() -> None:
+    st.set_page_config(page_title="BESS Sizing Calculator", page_icon="🔋", layout="wide")
+    st.markdown("""
+        <style>
+        .stApp { background: #e9eeeb; color: #1d2b31; }
+        [data-testid="stAppViewContainer"] { background: #e9eeeb; }
+        [data-testid="stHeader"] { background: transparent; }
+        [data-testid="stMainBlockContainer"] { max-width: 1440px; padding: 1.25rem 1.4rem 2.5rem; }
+        [data-testid="stMarkdownContainer"] { color: #26363d; }
+        [data-testid="stMarkdownContainer"] p { font-size: .9rem; line-height: 1.45; }
+        h1 { color: #172b33; font-size: 1.8rem !important; font-weight: 700 !important; margin: 0 0 .2rem; }
+        h2, h3 { color: #20343c; font-size: 1.08rem !important; font-weight: 650 !important; margin-bottom: .55rem !important; }
+        [data-testid="stVerticalBlockBorderWrapper"],
+        [data-testid="stVerticalBlockBorderWrapper"] > div,
+        [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stVerticalBlock"] { background: #fff !important; background-image: none !important; border-color: #c5d1d1; border-radius: 7px; box-shadow: 0 2px 8px rgba(22, 48, 54, .08); }
+        .st-key-load-input-panel, .st-key-results-panel,
+        .st-key-load-input-panel [data-testid="stVerticalBlock"],
+        .st-key-results-panel [data-testid="stVerticalBlock"] { background-color: #fff !important; background-image: none !important; }
+        [data-testid="stMetric"] { background: #fff !important; border: 1px solid #d0dadb; border-radius: 6px; padding: .55rem .65rem; min-height: 72px; }
+        [data-testid="stMetricLabel"] { color: #52666c; font-size: .78rem; }
+        [data-testid="stMetricValue"] { color: #183b43; font-size: 1.2rem; font-weight: 650; }
+        .setting-label { color: #30464e; font-size: .86rem; line-height: 1.3; padding: .4rem 0; }
+        [data-testid="stCaptionContainer"] { color: #52666c; font-size: .8rem; line-height: 1.45; }
+        [data-testid="stWidgetLabel"] p { color: #30464e; font-size: .84rem; }
+        [data-testid="stTextInput"] input, [data-testid="stNumberInput"] input,
+        [data-testid="stSelectbox"] [data-baseweb="select"] > div,
+        [data-testid="stTextArea"] textarea { background: #fff; border-color: #bdccce; }
+        [data-testid="stNumberInput"] button { display: none !important; }
+        [data-testid="stBaseButton-primary"] { background: #13766d; border-color: #13766d; color: #fff; }
+        [data-testid="stBaseButton-primary"]:hover { background: #0d625a; border-color: #0d625a; color: #fff; }
+        [data-testid="stAlert"] { border-radius: 6px; }
+        [data-testid="stAlert"] p { font-size: .88rem; line-height: 1.4; }
+        [data-testid="stHorizontalBlock"] { gap: .65rem; }
+        [data-testid="stDataFrame"] { font-size: .82rem; }
+        @media (max-width: 700px) {
+            [data-testid="stMainBlockContainer"] { padding: 1rem .8rem 2rem; }
+            h1 { font-size: 1.55rem !important; }
+        }
+        </style>
+    """, unsafe_allow_html=True)
+    st.title("BESS sizing calculator")
+    st.caption("Size a battery against your interval load profile, tariff, and payback target.")
+    input_column, output_column = st.columns([0.38, 0.62], gap="small")
+    with input_column:
+        with st.container(border=True, key="load-input-panel"):
+            st.subheader("Manipulating variables")
+            st.slider("Expected payback (years)", 1.0, 15.0, step=0.5, key="target")
+            optimize_clicked = st.button("Calculate optimal sizing", type="primary", width="stretch")
+            if optimize_clicked:
+                st.session_state.sizing_mode = "automatic"
+            st.markdown("**Load data (kW import)**")
+            st.caption("Paste timestamp and kW columns, or upload a CSV. Each row should contain a date-time and kW value.")
+            uploaded_file = st.file_uploader("Choose a CSV or text file", type=["csv", "txt", "tsv"])
+            uploaded_data = None
+            upload_error = None
+            if uploaded_file is not None:
+                if uploaded_file.size > 200_000:
+                    upload_error = "The uploaded file must be 200 kB or smaller."
+                else:
+                    try:
+                        uploaded_data = uploaded_file.getvalue().decode("utf-8-sig")
+                    except UnicodeDecodeError:
+                        upload_error = "The uploaded file must be a UTF-8 CSV or text file."
+            data_text = st.text_area(
+                "Load data", value=SAMPLE_TEXT, height=120, label_visibility="collapsed",
+            )
+            calculate_clicked = st.button("Calculate", type="primary", width="content")
+        with st.container(border=True):
+            render_settings(st)
+
+    with output_column:
+        with st.container(border=True, key="results-panel"):
+            st.subheader("Results")
+            if optimize_clicked or calculate_clicked or "calculation" not in st.session_state:
+                st.session_state.pop("chart_selected_units", None)
+                st.session_state.pop("simulation_selected_units", None)
+                st.session_state.pop("suggested_options_table", None)
+                st.session_state.calculation = (
+                    {"error": upload_error} if upload_error
+                    else calculate_from_inputs(data_text, uploaded_data)
+                )
+                if not st.session_state.calculation.get("error"):
+                    st.session_state.selected_option_units = st.session_state.calculation["result"]["units"]
+            selected_result = render_results(st.session_state.calculation)
+        with st.container(border=True):
+            render_peak_chart(st.session_state.calculation, selected_result)
+
+
+main()
+
